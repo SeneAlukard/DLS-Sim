@@ -1,0 +1,231 @@
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+#include <mutex>
+#include <netinet/in.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+
+#define PORT 8080
+#define MAX_DRONES 3
+
+struct DroneData {
+  int id;
+  int battery;
+  bool isLeader;
+  int socket; // Store socket for communication
+};
+
+std::vector<DroneData> drones;
+std::vector<std::thread> droneThreads; // Store threads separately
+std::mutex droneMutex;
+int nextDroneID = 1; // To assign unique IDs
+
+void printDrones() {
+  std::lock_guard<std::mutex> lock(droneMutex);
+  std::cout << "[DEBUG] Current Drones:\n";
+  for (const auto &drone : drones) {
+    std::cout << "  ID: " << drone.id << ", Battery: " << drone.battery
+              << ", IsLeader: " << (drone.isLeader ? "Yes" : "No") << "\n";
+  }
+}
+
+void notifyLeaderChange(int newLeaderID) {
+  std::cout << "[DEBUG] Entering notifyLeaderChange(), New Leader ID: "
+            << newLeaderID << "\n";
+
+  std::cout
+      << "[DEBUG] Attempting to acquire droneMutex in notifyLeaderChange()\n";
+  std::lock_guard<std::mutex> lock(droneMutex);
+  std::cout << "[DEBUG] Acquired droneMutex in notifyLeaderChange()\n";
+
+  for (auto &drone : drones) {
+    std::string message;
+    if (drone.id == newLeaderID) {
+      message = "ROLE_CHANGE LEADER";
+      drone.isLeader = true;
+    } else {
+      message = "ROLE_CHANGE FOLLOWER " + std::to_string(newLeaderID);
+      drone.isLeader = false;
+    }
+
+    std::cout << "[DEBUG] Preparing to send to Drone ID: " << drone.id
+              << ", Message: " << message << "\n";
+
+    if (send(drone.socket, message.c_str(), message.size(), 0) <= 0) {
+      std::cerr << "[ERROR] Failed to send ROLE_CHANGE to Drone " << drone.id
+                << ". Closing socket and removing drone.\n";
+
+      close(drone.socket);
+      drones.erase(std::remove_if(drones.begin(), drones.end(),
+                                  [&drone](const DroneData &d) {
+                                    return d.id == drone.id;
+                                  }),
+                   drones.end());
+      break;
+    } else {
+      std::cout << "[DEBUG] Successfully sent to Drone ID: " << drone.id
+                << "\n";
+    }
+  }
+
+  std::cout << "[DEBUG] Exiting notifyLeaderChange()\n";
+}
+
+void selectLeader() {
+  std::cout << "[DEBUG] Entering selectLeader()\n";
+
+  std::lock_guard<std::mutex> lock(droneMutex);
+
+  // Log the current number of drones
+  std::cout << "[DEBUG] Connected drones: " << drones.size() << "\n";
+
+  // Check if there are enough drones to select a leader
+  if (drones.size() < 2) {
+    std::cout << "[INFO] Not enough drones to select a leader. Connected: "
+              << drones.size() << "\n";
+    std::cout << "[DEBUG] Exiting selectLeader()\n";
+    return;
+  }
+
+  // Reset all drones to follower and log the operation
+  std::cout << "[DEBUG] Resetting leader flags for all drones\n";
+  for (auto &drone : drones) {
+    drone.isLeader = false;
+  }
+
+  // Find the drone with the highest battery
+  std::cout << "[DEBUG] Finding drone with highest battery\n";
+  int maxBattery = -1;
+  int leaderID = -1;
+
+  for (const auto &drone : drones) {
+    std::cout << "[DEBUG] Checking drone ID: " << drone.id
+              << ", Battery: " << drone.battery << "\n";
+    if (drone.battery > maxBattery) {
+      maxBattery = drone.battery;
+      leaderID = drone.id;
+    }
+  }
+
+  // Log the selected leader
+  if (leaderID == -1) {
+    std::cerr << "[ERROR] No valid leader found. This should not happen.\n";
+  } else {
+    std::cout << "[DEBUG] Selected leader ID: " << leaderID << "\n";
+    notifyLeaderChange(leaderID);
+  }
+
+  std::cout << "[DEBUG] Exiting selectLeader()\n";
+}
+
+void droneHandler(DroneData drone) {
+  while (true) {
+    std::this_thread::sleep_for(
+        std::chrono::seconds(5)); // Send STATUS_CHECK every 5 seconds
+
+    char heartbeat[] = "STATUS_CHECK";
+    if (send(drone.socket, heartbeat, strlen(heartbeat), 0) <= 0) {
+      std::cerr << "[INFO] Drone " << drone.id << " disconnected.\n";
+
+      // Remove the drone from the list
+      {
+        std::lock_guard<std::mutex> lock(droneMutex);
+        auto it = std::find_if(
+            drones.begin(), drones.end(),
+            [&drone](const DroneData &d) { return d.id == drone.id; });
+        if (it != drones.end()) {
+          close(it->socket);
+          drones.erase(it);
+        }
+      }
+      break;
+    }
+  }
+}
+
+void handleNewConnection(int clientSocket) {
+  char buffer[1024] = {0};
+
+  // Receive battery level from the drone
+  int bytesRead = read(clientSocket, buffer, 1024);
+  if (bytesRead <= 0) {
+    std::cerr << "[ERROR] Failed to read battery level from drone.\n";
+    close(clientSocket);
+    return;
+  }
+
+  int battery = std::stoi(buffer);
+
+  // Assign unique ID and store drone data
+  DroneData newDrone;
+  {
+    std::lock_guard<std::mutex> lock(droneMutex);
+    newDrone.id = nextDroneID++;
+    newDrone.battery = battery;
+    newDrone.isLeader = false;
+    newDrone.socket = clientSocket;
+    drones.push_back(newDrone);
+  }
+
+  // Send ID back to the drone
+  std::string idMessage = "ID " + std::to_string(newDrone.id);
+  if (send(clientSocket, idMessage.c_str(), idMessage.size(), 0) <= 0) {
+    std::cerr << "[ERROR] Failed to send ID to Drone " << newDrone.id << ".\n";
+    close(clientSocket);
+    return;
+  }
+  std::cout << "[INFO] Assigned ID " << newDrone.id
+            << " to a drone with battery " << battery << "%\n";
+
+  printDrones();
+
+  // Start a thread for this drone
+  droneThreads.emplace_back(std::thread(droneHandler, newDrone));
+
+  // Perform leader selection
+  selectLeader();
+}
+
+int main() {
+  int server_fd, new_socket;
+  struct sockaddr_in address;
+  int addrlen = sizeof(address);
+
+  // Create socket
+  if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    perror("[ERROR] Socket creation failed");
+    exit(EXIT_FAILURE);
+  }
+
+  // Bind to port
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_port = htons(PORT);
+
+  if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    perror("[ERROR] Bind failed");
+    exit(EXIT_FAILURE);
+  }
+
+  // Listen for connections
+  if (listen(server_fd, MAX_DRONES) < 0) {
+    perror("[ERROR] Listen failed");
+    exit(EXIT_FAILURE);
+  }
+
+  std::cout << "[INFO] gBS Server listening on port " << PORT << "...\n";
+
+  while (true) {
+    // Accept new connections
+    if ((new_socket = accept(server_fd, (struct sockaddr *)&address,
+                             (socklen_t *)&addrlen)) >= 0) {
+      std::cout << "[INFO] New drone connected.\n";
+      handleNewConnection(new_socket);
+    }
+  }
+
+  return 0;
+}
