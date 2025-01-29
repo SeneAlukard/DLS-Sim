@@ -13,7 +13,6 @@
 std::atomic<bool> isLeader(false); // Track if this drone is the leader
 int droneID = -1;                  // Assigned by gBS
 int currentLeaderID = -1;
-int rssi = 0; // Current RSSI level
 
 void handleGBSMessages(int sock) {
   char buffer[1024] = {0};
@@ -45,10 +44,8 @@ void handleGBSMessages(int sock) {
       }
     } else if (message == "STATUS_CHECK") {
       std::cout << "Received STATUS_CHECK from gBS.\n";
-      // Send STATUS_OK with current RSSI level
-      std::string response = "STATUS_OK " + std::to_string(rssi);
+      std::string response = "STATUS_OK";
       send(sock, response.c_str(), response.size(), 0);
-      std::cout << "Sent response: " << response << "\n";
     }
   }
 }
@@ -77,25 +74,22 @@ int main() {
     return -1;
   }
 
-  // Assign random RSSI level
+  // Assign random battery level
   std::srand(std::time(0) ^
              std::hash<std::thread::id>{}(std::this_thread::get_id()));
-  rssi = -75 - (rand() % 36); // Generate a value between -75 and -110
-  std::cout << "Random RSSI Level: " << rssi << "\n";
+  int battery = rand() % 100 + 1; // Random battery level between 1 and 100
+  std::cout << "Random Battery Level: " << battery << "%\n";
 
-  // Send RSSI level to gBS
-  std::string data = std::to_string(rssi);
+  // Send battery level to gBS
+  std::string data = std::to_string(battery);
   send(sock, data.c_str(), data.size(), 0);
 
   // Handle messages from gBS
   std::thread(handleGBSMessages, sock).detach();
 
-  // Simulate RSSI changes over time
+  // Keep the program running
   while (true) {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    if (rssi < 0) {
-      rssi = -75 - (rand() % 36); // Generate a value between -75 and -110
-    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   return 0;

@@ -92,8 +92,8 @@ int main() {
 
   // Simulate RSSI changes over time
   while (true) {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    if (rssi < 0) {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    if (rssi > 0) {
       rssi = -75 - (rand() % 36); // Generate a value between -75 and -110
     }
   }

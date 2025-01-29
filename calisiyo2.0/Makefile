@@ -1,8 +1,6 @@
 # Define compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -g -pthread -I/usr/local/MATLAB/R2024b/extern/include
-LDFLAGS = -L/usr/local/MATLAB/R2024b/extern/bin/glnxa64
-LIBS = -lMatlabEngine -lMatlabDataArray
+CXXFLAGS = -std=c++17 -Wall -g -pthread
 
 # Get a list of all .cpp files in the directory
 SRC = $(wildcard *.cpp)
